@@ -2,6 +2,18 @@ provider "aws" {
   region = var.aws_region
 }
 
+# Generate SSH key
+resource "tls_private_key" "ssh_key" {
+  algorithm = "RSA"
+  rsa_bits  = 4096
+}
+
+# Create AWS Key Pair
+resource "aws_key_pair" "generated_key" {
+  key_name   = "strapi-auto-key"
+  public_key = tls_private_key.ssh_key.public_key_openssh
+}
+
 # Get latest Amazon Linux 2 AMI
 data "aws_ami" "amazon_linux" {
   most_recent = true
@@ -16,7 +28,7 @@ data "aws_ami" "amazon_linux" {
 
 # Security Group
 resource "aws_security_group" "strapi_sg" {
-  name        = "strapi-sg"
+  name_prefix = "strapi-sg-"
   description = "Allow SSH, HTTP, Strapi"
 
   ingress {
@@ -53,7 +65,8 @@ resource "aws_instance" "strapi_ec2" {
   ami           = data.aws_ami.amazon_linux.id
   instance_type = "t2.micro"
 
-  key_name = var.key_name
+  # ✅ Use generated key
+  key_name = aws_key_pair.generated_key.key_name
 
   vpc_security_group_ids = [aws_security_group.strapi_sg.id]
 
