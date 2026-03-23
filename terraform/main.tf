@@ -8,9 +8,14 @@ resource "tls_private_key" "ssh_key" {
   rsa_bits  = 4096
 }
 
+# Generate unique suffix
+resource "random_id" "key_suffix" {
+  byte_length = 2
+}
+
 # Create AWS Key Pair
 resource "aws_key_pair" "generated_key" {
-  key_name   = "strapi-auto-key"
+  key_name   = "strapi-auto-key-${random_id.key_suffix.hex}"
   public_key = tls_private_key.ssh_key.public_key_openssh
 }
 
@@ -63,9 +68,8 @@ resource "aws_security_group" "strapi_sg" {
 # EC2 Instance
 resource "aws_instance" "strapi_ec2" {
   ami           = data.aws_ami.amazon_linux.id
-  instance_type = "t3.small"
+  instance_type = "t3.small"  # ✅ free tier safe
 
-  # ✅ Use generated key
   key_name = aws_key_pair.generated_key.key_name
 
   vpc_security_group_ids = [aws_security_group.strapi_sg.id]
