@@ -15,8 +15,11 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v3
 
+      # ✅ FIX: Disable Terraform wrapper (IMPORTANT)
       - name: Setup Terraform
         uses: hashicorp/setup-terraform@v2
+        with:
+          terraform_wrapper: false
 
       - name: Configure AWS
         uses: aws-actions/configure-aws-credentials@v2
@@ -25,7 +28,8 @@ jobs:
           aws-secret-access-key: ${{ secrets.AWS_SECRET_KEY }}
           aws-region: ap-south-1
 
-      - name: Clean Terraform (avoid stale state)
+      # Clean previous Terraform state (CI safe)
+      - name: Clean Terraform
         run: rm -rf terraform/.terraform terraform/terraform.tfstate*
 
       - name: Terraform Init
@@ -34,20 +38,19 @@ jobs:
       - name: Terraform Apply
         run: terraform -chdir=terraform apply -auto-approve -input=false
 
-      # ✅ FIXED: Safe Public IP extraction
+      # ✅ Now safe (no wrapper logs)
       - name: Get Public IP
         run: |
-          IP=$(terraform -chdir=terraform output -raw public_ip | tr -d '\r')
+          IP=$(terraform -chdir=terraform output -raw public_ip)
           echo "IP=$IP" >> $GITHUB_ENV
 
-      # ✅ FIXED: Safe Private Key extraction
       - name: Get Private Key
         run: |
           echo "PRIVATE_KEY<<EOF" >> $GITHUB_ENV
-          terraform -chdir=terraform output -raw private_key | sed 's/\r$//' >> $GITHUB_ENV
+          terraform -chdir=terraform output -raw private_key >> $GITHUB_ENV
           echo "EOF" >> $GITHUB_ENV
 
-      - name: Wait for EC2 to be ready
+      - name: Wait for EC2
         run: sleep 60
 
       - name: SSH & Deploy Container
@@ -73,7 +76,7 @@ jobs:
             # Pull latest image
             docker pull ${{ secrets.DOCKER_USERNAME }}/strapi-app:latest
 
-            # Stop & remove old container
+            # Stop old container
             docker stop strapi || true
             docker rm strapi || true
 
@@ -85,7 +88,7 @@ jobs:
               --env NODE_ENV=production \
               ${{ secrets.DOCKER_USERNAME }}/strapi-app:latest
 
-            # Show logs
+            # Logs
             docker logs strapi --tail 50
 
             # Health check
