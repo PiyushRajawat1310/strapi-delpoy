@@ -15,7 +15,7 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v3
 
-      # ✅ FIX: Disable Terraform wrapper (IMPORTANT)
+      # ✅ Disable Terraform wrapper (fix env parsing issue)
       - name: Setup Terraform
         uses: hashicorp/setup-terraform@v2
         with:
@@ -28,31 +28,38 @@ jobs:
           aws-secret-access-key: ${{ secrets.AWS_SECRET_KEY }}
           aws-region: ap-south-1
 
-      # Clean previous Terraform state (CI safe)
+      # Clean Terraform state (CI safe)
       - name: Clean Terraform
         run: rm -rf terraform/.terraform terraform/terraform.tfstate*
 
       - name: Terraform Init
         run: terraform -chdir=terraform init
 
+      # 🔥 NEW STEP: Destroy old infrastructure
+      - name: Terraform Destroy (clean old infra)
+        run: terraform -chdir=terraform destroy -auto-approve || true
+
       - name: Terraform Apply
         run: terraform -chdir=terraform apply -auto-approve -input=false
 
-      # ✅ Now safe (no wrapper logs)
+      # Get EC2 Public IP
       - name: Get Public IP
         run: |
           IP=$(terraform -chdir=terraform output -raw public_ip)
           echo "IP=$IP" >> $GITHUB_ENV
 
+      # Get generated SSH private key
       - name: Get Private Key
         run: |
           echo "PRIVATE_KEY<<EOF" >> $GITHUB_ENV
           terraform -chdir=terraform output -raw private_key >> $GITHUB_ENV
           echo "EOF" >> $GITHUB_ENV
 
+      # Wait for EC2 instance to be ready
       - name: Wait for EC2
         run: sleep 60
 
+      # 🚀 Deploy Strapi Container
       - name: SSH & Deploy Container
         uses: appleboy/ssh-action@v0.1.10
         with:
@@ -76,16 +83,22 @@ jobs:
             # Pull latest image
             docker pull ${{ secrets.DOCKER_USERNAME }}/strapi-app:latest
 
-            # Stop old container
+            # Stop & remove old container
             docker stop strapi || true
             docker rm strapi || true
 
-            # Run new container
+            # Run new container with required env
             docker run -d \
               -p 1337:1337 \
               --name strapi \
               --restart always \
               --env NODE_ENV=production \
+              --env APP_KEYS=testKey1,testKey2 \
+              --env API_TOKEN_SALT=testSalt \
+              --env ADMIN_JWT_SECRET=testSecret \
+              --env TRANSFER_TOKEN_SALT=testSalt \
+              --env JWT_SECRET=testJWT \
+              --env ENCRYPTION_KEY=testEncryption \
               ${{ secrets.DOCKER_USERNAME }}/strapi-app:latest
 
             # Logs
