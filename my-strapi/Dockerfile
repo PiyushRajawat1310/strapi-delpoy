@@ -1,26 +1,31 @@
-# -------- BUILD STAGE --------
 FROM node:18-alpine AS builder
 
 WORKDIR /app
 
-COPY package*.json ./
-RUN npm install
+# Install dependencies
+COPY package.json yarn.lock* package-lock.json* pnpm-lock.yaml* ./
+RUN \
+  if [ -f yarn.lock ]; then yarn install --frozen-lockfile; \
+  elif [ -f package-lock.json ]; then npm ci; \
+  elif [ -f pnpm-lock.yaml ]; then npm install -g pnpm && pnpm install --frozen-lockfile; \
+  else npm install; \
+  fi
 
+# Copy Strapi source
 COPY . .
 
-RUN npm run build
+# Build Strapi for production
+RUN NODE_ENV=production npm run build || NODE_ENV=production yarn build
 
-# -------- PRODUCTION STAGE --------
 FROM node:18-alpine
 
+ENV NODE_ENV=production
 WORKDIR /app
 
-ENV NODE_ENV=production
-
+# Copy built app
 COPY --from=builder /app ./
-
-RUN npm install --omit=dev
 
 EXPOSE 1337
 
+# Strapi default start command
 CMD ["npm", "run", "start"]
