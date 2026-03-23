@@ -63,7 +63,7 @@ resource "aws_security_group" "strapi_sg" {
 # EC2 Instance
 resource "aws_instance" "strapi_ec2" {
   ami           = data.aws_ami.amazon_linux.id
-  instance_type = "t2.micro"
+  instance_type = "t3.small"
 
   # ✅ Use generated key
   key_name = aws_key_pair.generated_key.key_name
