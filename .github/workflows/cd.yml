@@ -8,6 +8,7 @@ on:
 
 jobs:
   deploy:
+    if: ${{ github.event.workflow_run.conclusion == 'success' }}
     runs-on: ubuntu-latest
 
     steps:
@@ -28,20 +29,43 @@ jobs:
         run: terraform -chdir=terraform init
 
       - name: Terraform Apply
-        run: terraform -chdir=terraform apply -auto-approve -var="key_name=${{ secrets.KEY_NAME }}"
+        run: terraform -chdir=terraform apply -auto-approve
 
       - name: Get Public IP
-        id: ip
         run: echo "IP=$(terraform -chdir=terraform output -raw public_ip)" >> $GITHUB_ENV
+
+      - name: Get Private Key
+        run: |
+          echo "PRIVATE_KEY<<EOF" >> $GITHUB_ENV
+          terraform -chdir=terraform output -raw private_key >> $GITHUB_ENV
+          echo "EOF" >> $GITHUB_ENV
+
+      - name: Wait for EC2
+        run: sleep 60
 
       - name: SSH & Deploy Container
         uses: appleboy/ssh-action@v0.1.10
         with:
           host: ${{ env.IP }}
           username: ec2-user
-          key: ${{ secrets.EC2_SSH_KEY }}
+          key: ${{ env.PRIVATE_KEY }}
           script: |
+            # Wait for Docker
+            until docker info >/dev/null 2>&1; do
+              echo "Waiting for Docker..."
+              sleep 5
+            done
+
             docker pull ${{ secrets.DOCKER_USERNAME }}/strapi-app:latest
+
             docker stop strapi || true
             docker rm strapi || true
-            docker run -d -p 1337:1337 --name strapi --restart always ${{ secrets.DOCKER_USERNAME }}/strapi-app:latest
+
+            docker run -d \
+              -p 1337:1337 \
+              --name strapi \
+              --restart always \
+              --env NODE_ENV=production \
+              ${{ secrets.DOCKER_USERNAME }}/strapi-app:latest
+
+            docker logs strapi --tail 50
