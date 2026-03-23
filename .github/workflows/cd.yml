@@ -25,22 +25,29 @@ jobs:
           aws-secret-access-key: ${{ secrets.AWS_SECRET_KEY }}
           aws-region: ap-south-1
 
+      - name: Clean Terraform (avoid stale state)
+        run: rm -rf terraform/.terraform terraform/terraform.tfstate*
+
       - name: Terraform Init
         run: terraform -chdir=terraform init
 
       - name: Terraform Apply
-        run: terraform -chdir=terraform apply -auto-approve
+        run: terraform -chdir=terraform apply -auto-approve -input=false
 
+      # ✅ FIXED: Safe Public IP extraction
       - name: Get Public IP
-        run: echo "IP=$(terraform -chdir=terraform output -raw public_ip)" >> $GITHUB_ENV
+        run: |
+          IP=$(terraform -chdir=terraform output -raw public_ip | tr -d '\r')
+          echo "IP=$IP" >> $GITHUB_ENV
 
+      # ✅ FIXED: Safe Private Key extraction
       - name: Get Private Key
         run: |
           echo "PRIVATE_KEY<<EOF" >> $GITHUB_ENV
-          terraform -chdir=terraform output -raw private_key >> $GITHUB_ENV
+          terraform -chdir=terraform output -raw private_key | sed 's/\r$//' >> $GITHUB_ENV
           echo "EOF" >> $GITHUB_ENV
 
-      - name: Wait for EC2
+      - name: Wait for EC2 to be ready
         run: sleep 60
 
       - name: SSH & Deploy Container
@@ -49,18 +56,28 @@ jobs:
           host: ${{ env.IP }}
           username: ec2-user
           key: ${{ env.PRIVATE_KEY }}
+          port: 22
+          timeout: 120s
+          command_timeout: 20m
           script: |
+            # Ensure Docker is running
+            sudo systemctl start docker || true
+            sudo systemctl enable docker || true
+
             # Wait for Docker
             until docker info >/dev/null 2>&1; do
               echo "Waiting for Docker..."
               sleep 5
             done
 
+            # Pull latest image
             docker pull ${{ secrets.DOCKER_USERNAME }}/strapi-app:latest
 
+            # Stop & remove old container
             docker stop strapi || true
             docker rm strapi || true
 
+            # Run new container
             docker run -d \
               -p 1337:1337 \
               --name strapi \
@@ -68,4 +85,9 @@ jobs:
               --env NODE_ENV=production \
               ${{ secrets.DOCKER_USERNAME }}/strapi-app:latest
 
+            # Show logs
             docker logs strapi --tail 50
+
+            # Health check
+            sleep 10
+            curl -f http://localhost:1337 || echo "App not ready yet"
