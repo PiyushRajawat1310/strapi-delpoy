@@ -1,125 +1,106 @@
-provider "aws" {
-  region = var.aws_region
-}
+name: CD - Deploy to AWS
 
-# Generate SSH key
-resource "tls_private_key" "ssh_key" {
-  algorithm = "RSA"
-  rsa_bits  = 4096
-}
+on:
+  workflow_run:
+    workflows: ["CI - Build & Push Docker Image"]
+    types:
+      - completed
 
-# Generate unique suffix
-resource "random_id" "key_suffix" {
-  byte_length = 2
-}
+jobs:
+  deploy:
+    if: ${{ github.event.workflow_run.conclusion == 'success' }}
+    runs-on: ubuntu-latest
 
-# Create AWS Key Pair
-resource "aws_key_pair" "generated_key" {
-  key_name   = "strapi-auto-key-${random_id.key_suffix.hex}"
-  public_key = tls_private_key.ssh_key.public_key_openssh
-}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v3
 
-# Get latest Amazon Linux 2 AMI
-data "aws_ami" "amazon_linux" {
-  most_recent = true
+      # ✅ Disable Terraform wrapper (fix env parsing issue)
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v2
+        with:
+          terraform_wrapper: false
 
-  filter {
-    name   = "name"
-    values = ["amzn2-ami-hvm-*-x86_64-gp2"]
-  }
+      - name: Configure AWS
+        uses: aws-actions/configure-aws-credentials@v2
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_KEY }}
+          aws-region: ap-south-1
 
-  owners = ["amazon"]
-}
+      # Clean Terraform state (CI safe)
+      - name: Clean Terraform
+        run: rm -rf terraform/.terraform terraform/terraform.tfstate*
 
-# Security Group
-resource "aws_security_group" "strapi_sg" {
-  name_prefix = "strapi-sg-"
-  description = "Allow SSH, HTTP, Strapi"
+      - name: Terraform Init
+        run: terraform -chdir=terraform init
 
-  ingress {
-    from_port   = 22
-    to_port     = 22
-    protocol    = "tcp"
-    cidr_blocks = ["0.0.0.0/0"]
-  }
+      - name: Terraform Apply
+        run: terraform -chdir=terraform apply -auto-approve -input=false
 
-  ingress {
-    from_port   = 1337
-    to_port     = 1337
-    protocol    = "tcp"
-    cidr_blocks = ["0.0.0.0/0"]
-  }
+      # Get EC2 Public IP
+      - name: Get Public IP
+        run: |
+          IP=$(terraform -chdir=terraform output -raw public_ip)
+          echo "IP=$IP" >> $GITHUB_ENV
 
-  ingress {
-    from_port   = 80
-    to_port     = 80
-    protocol    = "tcp"
-    cidr_blocks = ["0.0.0.0/0"]
-  }
+      # Get generated SSH private key
+      - name: Get Private Key
+        run: |
+          echo "PRIVATE_KEY<<EOF" >> $GITHUB_ENV
+          terraform -chdir=terraform output -raw private_key >> $GITHUB_ENV
+          echo "EOF" >> $GITHUB_ENV
 
-  egress {
-    from_port   = 0
-    to_port     = 0
-    protocol    = "-1"
-    cidr_blocks = ["0.0.0.0/0"]
-  }
-}
+      # Wait for EC2 instance to be ready
+      - name: Wait for EC2
+        run: sleep 60
 
-# EC2 Instance
-resource "aws_instance" "strapi_ec2" {
-  ami           = data.aws_ami.amazon_linux.id
-  instance_type = "t3.micro"  # safer for free tier
+      # 🚀 Deploy Strapi Container
+      - name: SSH & Deploy Container
+        uses: appleboy/ssh-action@v0.1.10
+        with:
+          host: ${{ env.IP }}
+          username: ec2-user
+          key: ${{ env.PRIVATE_KEY }}
+          port: 22
+          timeout: 120s
+          command_timeout: 20m
+          script: |
+            # Ensure Docker is running
+            sudo systemctl start docker || true
+            sudo systemctl enable docker || true
+            iptables -P FORWARD ACCEPT
 
-  key_name = aws_key_pair.generated_key.key_name
+            # Wait for Docker
+            until docker info >/dev/null 2>&1; do
+              echo "Waiting for Docker..."
+              sleep 5
+            done
 
-  vpc_security_group_ids = [aws_security_group.strapi_sg.id]
+            # Pull latest image
+            docker pull ${{ secrets.DOCKER_USERNAME }}/strapi-app:latest
 
-  associate_public_ip_address = true
+            # Stop & remove old container
+            docker stop strapi || true
+            docker rm strapi || true
 
-  user_data = <<-EOF
-#!/bin/bash
+            # ✅ FIX: Add required Strapi env variables
+            docker run -d \
+              -p 1337:1337 \
+              --name strapi \
+              --restart always \
+              --env NODE_ENV=production \
+              --env APP_KEYS=testKey1,testKey2 \
+              --env API_TOKEN_SALT=testSalt \
+              --env ADMIN_JWT_SECRET=testSecret \
+              --env TRANSFER_TOKEN_SALT=testSalt \
+              --env JWT_SECRET=testJWT \
+              --env ENCRYPTION_KEY=testEncryption \
+              ${{ secrets.DOCKER_USERNAME }}/strapi-app:latest
 
-# Update system
-yum update -y
+            # Show logs
+            docker logs strapi --tail 50
 
-# Install Docker
-amazon-linux-extras install docker -y
-systemctl start docker
-systemctl enable docker
-usermod -aG docker ec2-user
-
-# 🔥 FIX DOCKER NETWORK ISSUE
-iptables -P FORWARD ACCEPT
-
-# Wait for Docker
-until docker info >/dev/null 2>&1; do
-  sleep 5
-done
-
-# Pull latest image
-docker pull ${DOCKER_IMAGE}
-
-# Stop old container if exists
-docker stop strapi || true
-docker rm strapi || true
-
-# Run Strapi container
-docker run -d \
-  -p 1337:1337 \
-  --name strapi \
-  --restart always \
-  --env NODE_ENV=production \
-  --env APP_KEYS=testKey1,testKey2 \
-  --env API_TOKEN_SALT=testSalt \
-  --env ADMIN_JWT_SECRET=testSecret \
-  --env TRANSFER_TOKEN_SALT=testSalt \
-  --env JWT_SECRET=testJWT \
-  --env ENCRYPTION_KEY=testEncryption \
-  ${DOCKER_IMAGE}
-
-EOF
-
-  tags = {
-    Name = "Strapi-Server"
-  }
-}
+            # Health check
+            sleep 10
+            curl -f http://localhost:1337 || echo "App not ready yet"
