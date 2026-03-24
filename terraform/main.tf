@@ -68,20 +68,56 @@ resource "aws_security_group" "strapi_sg" {
 # EC2 Instance
 resource "aws_instance" "strapi_ec2" {
   ami           = data.aws_ami.amazon_linux.id
-  instance_type = "t3.small"  # ✅ free tier safe
+  instance_type = "t3.micro"  # safer for free tier
 
   key_name = aws_key_pair.generated_key.key_name
 
   vpc_security_group_ids = [aws_security_group.strapi_sg.id]
 
+  associate_public_ip_address = true
+
   user_data = <<-EOF
-              #!/bin/bash
-              yum update -y
-              amazon-linux-extras install docker -y
-              systemctl start docker
-              systemctl enable docker
-              usermod -aG docker ec2-user
-              EOF
+#!/bin/bash
+
+# Update system
+yum update -y
+
+# Install Docker
+amazon-linux-extras install docker -y
+systemctl start docker
+systemctl enable docker
+usermod -aG docker ec2-user
+
+# 🔥 FIX DOCKER NETWORK ISSUE
+iptables -P FORWARD ACCEPT
+
+# Wait for Docker
+until docker info >/dev/null 2>&1; do
+  sleep 5
+done
+
+# Pull latest image
+docker pull ${DOCKER_IMAGE}
+
+# Stop old container if exists
+docker stop strapi || true
+docker rm strapi || true
+
+# Run Strapi container
+docker run -d \
+  -p 1337:1337 \
+  --name strapi \
+  --restart always \
+  --env NODE_ENV=production \
+  --env APP_KEYS=testKey1,testKey2 \
+  --env API_TOKEN_SALT=testSalt \
+  --env ADMIN_JWT_SECRET=testSecret \
+  --env TRANSFER_TOKEN_SALT=testSalt \
+  --env JWT_SECRET=testJWT \
+  --env ENCRYPTION_KEY=testEncryption \
+  ${DOCKER_IMAGE}
+
+EOF
 
   tags = {
     Name = "Strapi-Server"
