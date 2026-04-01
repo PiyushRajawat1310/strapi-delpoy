@@ -69,7 +69,6 @@ jobs:
             # Ensure Docker is running
             sudo systemctl start docker || true
             sudo systemctl enable docker || true
-            iptables -P FORWARD ACCEPT
 
             # Wait for Docker
             until docker info >/dev/null 2>&1; do
