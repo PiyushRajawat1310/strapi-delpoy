@@ -15,7 +15,7 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v3
 
-      # ✅ Disable Terraform wrapper (fix env parsing issue)
+      # ✅ Disable Terraform wrapper
       - name: Setup Terraform
         uses: hashicorp/setup-terraform@v2
         with:
@@ -28,14 +28,14 @@ jobs:
           aws-secret-access-key: ${{ secrets.AWS_SECRET_KEY }}
           aws-region: ap-south-1
 
-      # Clean Terraform state (CI safe)
+      # Clean Terraform state
       - name: Clean Terraform
         run: rm -rf terraform/.terraform terraform/terraform.tfstate*
 
       - name: Terraform Init
         run: terraform -chdir=terraform init
 
-      # 🔥 NEW STEP: Destroy old infrastructure
+      # 🔥 Destroy old infra
       - name: Terraform Destroy (clean old infra)
         run: terraform -chdir=terraform destroy -auto-approve || true
 
@@ -48,18 +48,17 @@ jobs:
           IP=$(terraform -chdir=terraform output -raw public_ip)
           echo "IP=$IP" >> $GITHUB_ENV
 
-      # Get generated SSH private key
+      # Get SSH private key
       - name: Get Private Key
         run: |
           echo "PRIVATE_KEY<<EOF" >> $GITHUB_ENV
           terraform -chdir=terraform output -raw private_key >> $GITHUB_ENV
           echo "EOF" >> $GITHUB_ENV
 
-      # Wait for EC2 instance to be ready
       - name: Wait for EC2
         run: sleep 60
 
-      # 🚀 Deploy Strapi Container
+      # 🚀 Deploy Container
       - name: SSH & Deploy Container
         uses: appleboy/ssh-action@v0.1.10
         with:
@@ -70,9 +69,12 @@ jobs:
           timeout: 120s
           command_timeout: 20m
           script: |
-            # Ensure Docker is running
+            # Start Docker
             sudo systemctl start docker || true
             sudo systemctl enable docker || true
+
+            # Fix Docker networking (IMPORTANT)
+            sudo iptables -P FORWARD ACCEPT
 
             # Wait for Docker
             until docker info >/dev/null 2>&1; do
@@ -80,16 +82,16 @@ jobs:
               sleep 5
             done
 
-            # Pull latest image
+            # Pull image
             docker pull ${{ secrets.DOCKER_USERNAME }}/strapi-app:latest
 
-            # Stop & remove old container
+            # Stop old container
             docker stop strapi || true
             docker rm strapi || true
 
-            # Run new container with required env
+            # 🔥 FIX: Use port 80
             docker run -d \
-              -p 1337:1337 \
+              -p 80:1337 \
               --name strapi \
               --restart always \
               --env NODE_ENV=production \
